@@ -1,0 +1,130 @@
+---
+title: "Dusendang Graticule Biostats Sample"
+author: "Jenny Dusendang"
+date: "September 22, 2023"
+output: html_document
+---
+
+## Background (from readme)
+
+Consider a cohort study design with a defined exposure and an outcome of interest (which is not 
+mortality).
+
+- Study period from July 1st though Dec 31st 2022
+- Exposure enters a subject into the exposed cohort and serves as the index date
+- Exposed subjects are exact matched with unexposed subjects based on age, gender, and a healthcare 
+encounter within the same week
+- Matching is performed without replacement
+- Exposed subjects may serve as unexposed matches during any week before the week of their exposure 
+date
+
+The provided tables (in csv format) contain the following data elements:
+Patient table
+
+- Patient ID
+- Gender
+- Date of birth
+- Date of death | NULL
+
+Encounter table
+- Patient ID
+- Encounter date
+- Exposure binary indicator
+- Outcome binary indicator
+
+For each of the following analysis steps, provide working code (in a language of your choosing):
+
+1. Load the data tables into dataframe(s) or a database
+2. Compute median age at index date for the exposed cohort (including CI at 95% confidence level)
+3. Compute aggregate time at risk for the exposed cohort, in person-days
+4. Finally, provide pseudo-code to select a 1:1 unexposed cohort based on the method outlined above.
+
+
+
+
+## Load packages
+```{r}
+
+library(dplyr)
+library(misty)
+
+```
+
+
+
+
+## Load data 
+```{r}
+
+patient_raw = read.csv('patient_table.csv')
+encounter_raw = read.csv('encounter_table.csv')
+
+```
+
+
+
+
+## Prep and clean 
+```{r}
+
+#are columns the right class? 
+sapply(patient_raw, class)
+sapply(encounter_raw, class)
+
+#dates need to be date class and binaries need to be TRUE FALSE
+patient = patient_raw %>%
+  mutate(birth_date = as.Date(birthdate, format = '%Y-%m-%d'),
+         death_date = as.Date(deceaseddate, format = '%Y-%m-%d'))
+
+encounter = encounter_raw %>%
+  mutate(encounter_date = as.Date(encounterdate, format = '%Y-%m-%d'),
+         exposure2 = as.logical(exposure),
+         outcome2 = as.logical(outcome))
+
+```
+
+
+
+
+## Median age at index for exposed (with 95% CI)
+Seems a little odd to calculate 95% interval for median so I'll do it for median and mean just to be 
+safe 
+Exposure date is index date 
+```{r}
+
+#do patients show up as exposed more than once? 
+index_test = encounter %>% 
+  filter(exposure2 == TRUE) %>%
+  group_by(patientid) %>%
+  summarize(count = n())
+
+#yes, use first instance as the start of exposure 
+index = encounter %>%
+  filter(exposure2 == TRUE) %>%
+  group_by(patientid) %>%
+  filter(encounter_date == min(encounter_date)) 
+
+#used this to check if pats had more than one first exposure visit (they did not) 
+# %>%
+#   summarize(count = n())
+
+age_index = index %>%
+  left_join(patient, by = 'patientid') %>%
+  mutate(age = as.numeric(encounter_date - birth_date) / 365.25)
+
+#mre standard mean calculation
+mean = mean(age_index$age)
+ci_mean = t.test(age_index$age)$conf.int
+
+#median 
+median = median(age_index$age)
+ci_median = ci.median(age_index$age, alternative = 'two.sided', conf.level = 0.95)
+
+#print it 
+print(paste('Median age at index: ', round(median, 1), ' years (95% CI: ', 
+            round(ci_median$result$low, 1), '-', round(ci_median$result$upp, 1), ')', sep = ''))
+
+```
+
+
+
