@@ -40,8 +40,6 @@ For each of the following analysis steps, provide working code (in a language of
 4. Finally, provide pseudo-code to select a 1:1 unexposed cohort based on the method outlined above.
 
 
-
-
 ## Load packages
 ```{r}
 
@@ -51,8 +49,6 @@ library(misty)
 ```
 
 
-
-
 ## Load data 
 ```{r}
 
@@ -60,8 +56,6 @@ patient_raw = read.csv('patient_table.csv')
 encounter_raw = read.csv('encounter_table.csv')
 
 ```
-
-
 
 
 ## Prep and clean 
@@ -84,47 +78,159 @@ encounter = encounter_raw %>%
 ```
 
 
+## Prep exposed data 
+```{r}
+
+cohort = patient %>%
+  #first outcome date
+  left_join(encounter %>%
+              filter(outcome2 == TRUE) %>%
+              select(patientid, outcome_date = encounter_date) %>%
+              group_by(patientid) %>%
+              filter(outcome_date == min(outcome_date)) %>%
+              ungroup(), by = 'patientid') %>%
+  #first exposure date
+  left_join(encounter %>%
+              filter(exposure2 == TRUE) %>%
+              select(patientid, exposure_date = encounter_date) %>%
+              group_by(patientid) %>%
+              filter(exposure_date == min(exposure_date)) %>%
+              ungroup(), by = 'patientid')
+
+exposed = cohort %>%
+  #filter to exposed 
+  filter(!is.na(exposure_date)) %>%
+  #remove those with outcome prior to exposure (not 'at risk' for outcome)
+  filter(is.na(outcome_date) | outcome_date > exposure_date)
+
+```
 
 
 ## Median age at index for exposed (with 95% CI)
-Seems a little odd to calculate 95% interval for median so I'll do it for median and mean just to be 
-safe 
-Exposure date is index date 
 ```{r}
 
-#do patients show up as exposed more than once? 
-index_test = encounter %>% 
-  filter(exposure2 == TRUE) %>%
-  group_by(patientid) %>%
-  summarize(count = n())
-
-#yes, use first instance as the start of exposure 
-index = encounter %>%
-  filter(exposure2 == TRUE) %>%
-  group_by(patientid) %>%
-  filter(encounter_date == min(encounter_date)) 
-
-#used this to check if pats had more than one first exposure visit (they did not) 
-# %>%
-#   summarize(count = n())
-
-age_index = index %>%
-  left_join(patient, by = 'patientid') %>%
-  mutate(age = as.numeric(encounter_date - birth_date) / 365.25)
-
-#mre standard mean calculation
-mean = mean(age_index$age)
-ci_mean = t.test(age_index$age)$conf.int
+age_index = exposed %>%
+  mutate(age = as.numeric(exposure_date - birth_date) / 365.25)
 
 #median 
 median = median(age_index$age)
 ci_median = ci.median(age_index$age, alternative = 'two.sided', conf.level = 0.95)
 
 #print it 
-print(paste('Median age at index: ', round(median, 1), ' years (95% CI: ', 
+print(paste('Median age at index among exposed: ', round(median, 1), ' years (95% CI: ', 
             round(ci_median$result$low, 1), '-', round(ci_median$result$upp, 1), ')', sep = ''))
 
 ```
+
+
+## Time at risk for exposed 
+Includes all time exposed before outcome, death, or end of study 
+```{r}
+
+time_at_risk = exposed %>%
+  mutate(end_of_fu = pmin(outcome_date, death_date, as.Date('2022-12-31', format = '%Y-%m-%d'), 
+                          na.rm = TRUE),
+         time_at_risk = as.numeric(end_of_fu - exposure_date)) 
+
+tot_time_at_risk = sum(time_at_risk$time_at_risk)
+
+print(paste('Total time at risk among exposed: ', tot_time_at_risk, ' person-days', sep = ''))
+
+```
+
+
+## Matching 
+```{r}
+
+#create clean dataset of exposed patients
+exposed_for_matching = exposed %>%
+  select(exposed_patientid = patientid, exposed_index_date = exposure_date, 
+         exposed_birth_date = birth_date, exposed_gender = gender)
+
+#create clean dataset of unexposed patients 
+unexposed = cohort %>%
+  #when are unexposed no longer valid as matching potential 
+  mutate(unexposed_end_date = pmin(exposure_date, death_date, na.rm = TRUE)) %>%
+  select(unexposed_patientid = patientid, unexposed_end_date, unexposed_birth_date = birth_date,
+         unexposed_gender = gender)
+
+#grab all encounters 
+unexposed_encounters = encounter %>%
+  select(patientid, unexposed_encounter_date = encounter_date) %>%
+  distinct()
+
+#merge unexposed to encounters 
+unexposed_options = unexposed %>%
+  left_join(unexposed_encounters, by = c('unexposed_patientid' = 'patientid'))
+
+#empty dataframe for matches to sit in
+matches = data.frame()
+
+#randomize order of datasets for matching (first arrange by ID then randomize) 
+set.seed(5678)
+exposed_for_matching = sample_n(exposed_for_matching %>% 
+                                  arrange(exposed_patientid), 
+                                nrow(exposed_for_matching))
+
+set.seed(5678)
+unexposed_options = sample_n(unexposed_options %>% 
+                               arrange(unexposed_patientid, unexposed_encounter_date), 
+                             nrow(unexposed_options))
+
+#run the matching!
+for (exposed_pats in 1:nrow(exposed_for_matching)){
+  
+  exposed_pat_row = exposed_for_matching %>%
+    filter(row_number() == exposed_pats)
+  
+  exposed_patientid = pull(exposed_pat_row, exposed_patientid)
+  exposed_gender = pull(exposed_pat_row, exposed_gender)
+  exposed_birth_date = pull(exposed_pat_row, exposed_birth_date)
+  exposed_index_date = pull(exposed_pat_row, exposed_index_date)
+  
+  test_unexposed = unexposed_options %>%
+    filter(
+      #not the same person 
+      unexposed_patientid != exposed_patientid &
+        #same gender
+        unexposed_gender == exposed_gender & 
+        #match within 10 years of age
+        as.numeric(abs(unexposed_birth_date - exposed_birth_date)) < 10 * 365.25 &
+        #match must still be unexposed and alive at index
+        unexposed_end_date > exposed_index_date &
+        #must have an encounter in week surrounding index
+        as.numeric(exposed_index_date - unexposed_encounter_date) < 7 &
+        as.numeric(exposed_index_date - unexposed_encounter_date) >= 0) 
+  
+  #if there isn't a match move on 
+  if (nrow(test_unexposed) == 0){
+    
+    matches = matches %>%
+      bind_rows(exposed_pat_row %>%
+                  select(exposed_patientid))
+  
+    #if there is a match put it in the matches dataset   
+  }else{
+    
+    picked_match = test_unexposed %>%
+      filter(row_number() == 1) %>%
+      select(unexposed_patientid)
+    
+    matches = matches %>%
+      bind_rows(test %>% 
+                  select(exposed_patientid) %>%
+                  bind_cols(picked_match))
+    
+    #remove patient from the pool
+    unexposed_options = unexposed_options %>%
+      filter(unexposed_patientid != pull(picked_match, unexposed_patientid))
+    
+  }
+  
+}
+
+```
+
 
 
 
