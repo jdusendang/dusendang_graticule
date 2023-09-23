@@ -217,7 +217,7 @@ for (exposed_pats in 1:nrow(exposed_for_matching)){
       select(unexposed_patientid)
     
     matches = matches %>%
-      bind_rows(test %>% 
+      bind_rows(exposed_pat_row %>% 
                   select(exposed_patientid) %>%
                   bind_cols(picked_match))
     
@@ -228,6 +228,8 @@ for (exposed_pats in 1:nrow(exposed_for_matching)){
   }
   
 }
+
+#probably need to reconsider matching criteria as we didn't get many matches 
 
 ```
 
